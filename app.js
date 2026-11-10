@@ -24,13 +24,15 @@
   function loadPublished() {
     try {
       var d = JSON.parse(document.getElementById('wf-content').textContent.trim() || 'null');
-      if (d && d.v) {
-        d.settings = d.settings || {}; d.properties = d.properties || [];
-        d.reels = d.reels || []; d.localities = d.localities || [];
-        return d;
-      }
+      return normalise(d);
     } catch (e) { /* fall through to defaults */ }
     return null;
+  }
+  function normalise(d) {
+    if (!d || !d.v) return null;
+    d.settings = d.settings || {}; d.properties = d.properties || [];
+    d.reels = d.reels || []; d.localities = d.localities || [];
+    return d;
   }
 
   var SETTING_PATH = {
@@ -71,7 +73,11 @@
   function grade(n) {
     return n >= 80 ? ['Strong', 'good'] : n >= 65 ? ['Good', 'good'] : n >= 50 ? ['Mixed', 'warn'] : ['Weak', 'bad'];
   }
-  function assetUrl(id) { return '/_blob/' + encodeURIComponent(id); }
+  // An uploaded file is stored either as a full https address or as a Claude asset id.
+  function assetUrl(ref) {
+    ref = String(ref || '');
+    return /^https:\/\//i.test(ref) ? esc(ref) : '/_blob/' + encodeURIComponent(ref);
+  }
 
   var WA_ICON = '<svg class="wa-ico" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 5h16v11H10l-6 4z"/></svg>';
 
@@ -317,10 +323,35 @@
     CFG: CFG, published: loadPublished(), content: null, defaults: defaults,
     esc: esc, clone: clone, setting: setting, configValue: configValue, waLink: waLink,
     fmtPrice: fmtPrice, overall: overall, grade: grade, assetUrl: assetUrl, SCORE_KEYS: SCORE_KEYS,
-    SETTING_KEYS: Object.keys(SETTING_PATH), route: route
+    SETTING_KEYS: Object.keys(SETTING_PATH), route: route, api: null
   };
   WF.content = WF.published || defaults();
 
-  window.addEventListener('hashchange', route);
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', route); else route();
+  /* On a host with the server API (/api), content and admin sign-in come from
+     there. On the Claude-hosted page the request finds nothing and the page
+     carries on with its own published content. */
+  function boot() {
+    var started = false;
+    function start() { if (!started) { started = true; route(); } }
+    var timer = setTimeout(start, 3500);
+    function settle() { clearTimeout(timer); start(); }
+    try {
+      fetch('/api/content', { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || !d.api) return;
+          WF.api = { configured: !!d.configured, signedIn: !!d.signedIn, storage: d.storage !== false };
+          var c = normalise(d.content);
+          if (c) { WF.published = c; WF.content = c; }
+          if (started && view === 'site') { view = ''; route(); }
+        })
+        .catch(function () { /* no API here */ })
+        .then(settle);
+    } catch (e) { settle(); }
+  }
+
+  window.addEventListener('hashchange', function () { if (bootDone) route(); });
+  var bootDone = false;
+  function begin() { boot(); bootDone = true; }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', begin); else begin();
 })();

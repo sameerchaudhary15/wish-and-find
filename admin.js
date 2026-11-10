@@ -25,7 +25,52 @@
     if (!window.claude || !window.claude.use) return Promise.resolve(null);
     return window.claude.use(name).catch(function () { return null; });
   }
+  /* ---------- server API (used when the site is hosted with its /api backend) ---------- */
+  function apiFetch(path, method, body) {
+    return fetch('/api/' + path, {
+      method: method, credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'wf-admin' },
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) throw { code: d.error || 'failed', status: r.status, message: d.message };
+        return d;
+      });
+    });
+  }
+  var apiAssets = {
+    upload: function (file) {
+      if (!window.WFBlobUpload) return Promise.reject({ code: 'unavailable' });
+      var name = 'media/' + String(file.name || 'file').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(-80);
+      return window.WFBlobUpload(name, file, { access: 'public', handleUploadUrl: '/api/upload', multipart: file.size > 8 * 1024 * 1024 })
+        .then(function (blob) { return { id: blob.url }; });
+    }
+  };
+  function afterAccess() {
+    if (WF.api) {
+      caps.assets = apiAssets;
+      if (!window.WFBlobUpload && !document.getElementById('wf-blob-js')) {
+        var s = document.createElement('script'); s.id = 'wf-blob-js'; s.src = 'vendor/blob-client.js'; document.head.appendChild(s);
+      }
+    } else {
+      use('assets').then(function (a) { caps.assets = a; if (location.hash === '#admin') render(); });
+    }
+  }
+  function loginHTML(message) {
+    if (WF.api && !WF.api.configured) {
+      return shellHTML('<div class="adm-gate"><h1>Admin password is not set</h1>' +
+        '<p>In the hosting dashboard, open the project\u2019s environment settings, add a variable named ADMIN_PASSWORD with the password you want, then redeploy the site.</p>' +
+        '<a class="btn" href="#top">Back to the site</a></div>', true);
+    }
+    return shellHTML('<form class="adm-gate adm-form" id="login-form"><h1>Admin sign in</h1>' +
+      '<p>Enter the admin password to manage listings, reels and reports.</p>' +
+      '<label for="login-password">Password<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>' +
+      '<p class="adm-note bad" id="login-error" role="alert"' + (message ? '' : ' hidden') + '>' + esc(message || '') + '</p>' +
+      '<div class="adm-actions"><button class="btn" type="submit">Sign in</button><a class="btn ghost" href="#top">Back to the site</a></div></form>', true);
+  }
+
   function checkAccess() {
+    if (WF.api) return Promise.resolve(WF.api.signedIn);
     return new Promise(function (resolve) {
       var done = false;
       function fin(v) { if (!done) { done = true; clearTimeout(timer); resolve(v); } }
@@ -37,15 +82,17 @@
   /* ---------- mount ---------- */
   function mount(app) {
     root = app;
+    if (!root.dataset.admBound) { root.dataset.admBound = '1'; root.addEventListener('click', onClick); root.addEventListener('submit', onSubmit); root.addEventListener('input', onInput); }
     if (access === null) {
       root.innerHTML = shellHTML('<div class="adm-gate"><h1>Admin</h1><p>Checking your access.</p></div>', true);
       checkAccess().then(function (ok) {
         access = ok;
-        if (ok) use('assets').then(function (a) { caps.assets = a; if (location.hash === '#admin') render(); });
+        if (ok) afterAccess();
         if (location.hash === '#admin') mount(app);
       });
       return;
     }
+    if (!access && WF.api) { root.innerHTML = loginHTML(''); return; }
     if (!access) {
       root.innerHTML = shellHTML('<div class="adm-gate"><h1>Admin is for the site team</h1>' +
         '<p>Only the owner and editors of this site can manage listings, reels and reports. Sign in to Claude with the account that owns the site, then open this page again.</p>' +
@@ -58,14 +105,13 @@
       else draft = WF.clone(WF.content);
       var t = ssGet('wf-tab'); if (t && TABS.some(function (x) { return x[0] === t; })) tab = t;
     }
-    if (!root.dataset.admBound) { root.dataset.admBound = '1'; root.addEventListener('click', onClick); root.addEventListener('submit', onSubmit); root.addEventListener('input', onInput); }
     render();
   }
 
   function shellHTML(body, bare) {
     return '<div class="adm">' +
       '<header class="adm-top"><div class="adm-top-row"><a class="logo" href="#top"><span class="logo-mark" aria-hidden="true"></span>' + esc((WF.CFG.brand || {}).name || 'Site') + '<span class="adm-badge">Admin</span></a>' +
-      '<a class="link" href="#top">View site</a></div></header>' +
+      '<span class="adm-top-links"><a class="link" href="#top">View site</a>' + (WF.api && access ? '<button class="btn ghost small" type="button" data-act="logout">Sign out</button>' : '') + '</span></div></header>' +
       (bare ? '<div class="adm-bare">' + body + '</div>' : body) + '</div>';
   }
 
@@ -107,6 +153,7 @@
       [count(p, function (x) { return !x.photo; }) === 0, 'Every listing has a photo', count(p, function (x) { return !x.photo; }) + ' listing(s) have no photo yet.'],
       [count(r, function (x) { return !x.assetId && !x.link; }) === 0, 'Every reel has a video or link', count(r, function (x) { return !x.assetId && !x.link; }) + ' reel(s) have no video yet.']
     ];
+    if (WF.api && !WF.api.storage) checks.unshift([false, '', 'File storage is not connected, so publishing and uploads will fail. Connect a Blob store to the project in the hosting dashboard, then redeploy.']);
     return '<h1>Overview</h1>' +
       '<div class="adm-tiles">' + tiles.map(function (t) { return '<div class="adm-tile"><span class="adm-tile-label">' + t[0] + '</span><span class="adm-tile-num">' + t[1] + '</span><span class="adm-tile-sub">' + t[2] + '</span></div>'; }).join('') + '</div>' +
       '<div class="adm-two">' + breakdown('Listings by status', STATUSES, 'status') + breakdown('Listings by type', TYPES, 'type') + '</div>' +
@@ -254,6 +301,10 @@
     var act = b.dataset.act, id = b.dataset.id, x;
     if (act === 'tab') { tab = b.dataset.tab; editing = null; confirmDel = null; note = null; ssSet('wf-tab', tab); render(); }
     else if (act === 'publish') publish();
+    else if (act === 'logout') {
+      var out = function () { access = false; WF.api.signedIn = false; root.innerHTML = loginHTML(''); };
+      apiFetch('logout', 'POST').then(out, out);
+    }
     else if (act === 'discard') { draft = WF.clone(WF.content); dirty = false; editing = null; note = { kind: 'ok', text: 'Changes discarded.' }; saveDraft(); render(); }
     else if (act === 'add-prop') { editing = { kind: 'prop', id: null }; render(); focus('pf-title'); }
     else if (act === 'edit-prop') { editing = { kind: 'prop', id: id }; render(); focus('pf-title'); }
@@ -302,6 +353,21 @@
   function onSubmit(e) {
     var f = e.target; if (location.hash !== '#admin') return;
     e.preventDefault();
+    if (f.id === 'login-form') {
+      var lb = f.querySelector('[type=submit]'), le = document.getElementById('login-error');
+      lb.disabled = true; lb.textContent = 'Signing in';
+      apiFetch('login', 'POST', { password: f.elements.password.value }).then(function () {
+        f.reset(); WF.api.signedIn = true; access = true; afterAccess(); mount(root);
+      }, function (err) {
+        lb.disabled = false; lb.textContent = 'Sign in'; f.elements.password.value = '';
+        le.hidden = false;
+        le.textContent = err.status === 429 ? 'Too many wrong attempts. Try again in 15 minutes.'
+          : err.code === 'wrong_password' ? 'Wrong password.'
+          : err.code === 'not_configured' ? 'The admin password has not been set on the host yet.'
+          : 'Could not sign in. Check your connection and try again.';
+      });
+      return;
+    }
     if (busy) return;
     if (f.id === 'prop-form') {
       var data = {
@@ -376,6 +442,21 @@
   function publish() {
     if (busy) return;
     busy = true; note = null; render();
+    if (WF.api) {
+      var next = WF.clone(draft); next.updatedAt = new Date().toISOString();
+      apiFetch('content', 'PUT', { content: next }).then(function () {
+        WF.published = next; WF.content = next; draft = WF.clone(next); dirty = false; busy = false; ssDel('wf-draft');
+        note = { kind: 'ok', text: 'Published. Visitors now see this version.' }; render();
+      }, function (e) {
+        busy = false; saveDraft();
+        if (e.code === 'signed_out') { access = false; WF.api.signedIn = false; root.innerHTML = loginHTML('Your session ended. Sign in again; your changes are kept.'); return; }
+        note = { kind: 'bad', text: e.code === 'invalid_content' ? e.message
+          : e.code === 'too_large' ? 'The content is too large to publish. Shorten long descriptions and try again.'
+          : 'Publishing did not go through. Your changes are still here. If this keeps happening, check that file storage is connected to the site.' };
+        render();
+      });
+      return;
+    }
     use('artifact').then(function (art) {
       if (!art) throw { code: 'not_granted' };
       var out = WF.clone(draft); out.updatedAt = new Date().toISOString();
